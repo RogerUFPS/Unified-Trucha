@@ -1,0 +1,802 @@
+"use client";
+
+import { usePermissions } from "@/lib/usePermissions";
+import { buildApiUrl } from "@/lib/apiConfig";
+import { clearSession } from "@/lib/auth";
+import { EntityNotFound, LoadError } from "@/components/states/ResourceState";
+import { Suspense, use, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import {
+  ArrowLeft,
+  ArrowUpRight,
+  UserCog,
+  Package,
+  Plus,
+  Loader2,
+  Receipt,
+  Search,
+  Factory,
+  Waves,
+  CalendarClock,
+} from "lucide-react";
+
+import { Button } from "@/components/ui/button";
+import { Ponds } from "@/app/components/ponds/ponds";
+import { Batches } from "@/app/components/batches/batches";
+import { BatchRegisterForm } from "@/app/components/batches/batch_form";
+import { ProductionPlans } from "@/app/components/production/production_plan";
+import { ProductionPlanForm } from "@/app/components/production/production_plan_form";
+import { Field, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { PondRegisterForm } from "@/app/components/ponds/pond_form";
+import { FeedingSchedules } from "@/app/components/feeding/feeding_schedules_tab";
+import { FarmWorkers } from "@/app/components/workers/farm_workers_tab";
+import InventoryContent from "@/app/home/granja/[id]/inventory/InventoryContent";
+import SalesContent from "@/app/home/granja/[id]/sales/SalesContent";
+
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+
+/* ---------- Piezas visuales locales (sin lógica de negocio) ---------- */
+
+function InfoItem({ label, children }) {
+  return (
+    <div>
+      <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">
+        {label}
+      </dt>
+      <dd className="mt-0.5 text-sm font-semibold text-slate-900">
+        {children}
+      </dd>
+    </div>
+  );
+}
+
+function SearchBox({ id, label, placeholder, value, onChange }) {
+  return (
+    <Field className="w-full sm:max-w-sm">
+      <FieldLabel htmlFor={id} className="sr-only">
+        {label}
+      </FieldLabel>
+      <div className="relative">
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+        <Input
+          id={id}
+          placeholder={placeholder}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="pl-9"
+        />
+      </div>
+    </Field>
+  );
+}
+
+function ModuleHeader({ title, description, action }) {
+  return (
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <h2 className="text-xl font-semibold text-slate-900">{title}</h2>
+        <p className="text-sm text-slate-500">{description}</p>
+      </div>
+      {action}
+    </div>
+  );
+}
+
+const primaryBtn =
+  "bg-blue-600 text-white hover:bg-blue-700 focus-visible:ring-2 focus-visible:ring-blue-300 rounded-lg shadow-sm";
+
+export default function Granja({ params }) {
+  const { id } = use(params);
+
+  const [granja, setGranja] = useState([]);
+  // D-04: estado explícito de la carga de la granja
+  const [farmStatus, setFarmStatus] = useState("loading"); // loading | ready | not_found | error
+  const [farmReload, setFarmReload] = useState(0);
+  const [departamentos, setDepartmentos] = useState([]);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("");
+  const [searchBatch, setSearchBatch] = useState("");
+  const [searchPlan, setSearchPlan] = useState("");
+  const [ciudades, setCiudades] = useState([]);
+  const [tab, setTab] = useState("produccion");
+  const [subTab, setSubTab] = useState("planes");
+
+  const router = useRouter();
+
+  const [userData, setUserData] = useState(null);
+
+  useEffect(() => {
+    let mounted = true;
+
+    try {
+      const userString = localStorage.getItem("user");
+
+      if (userString && mounted) {
+        Promise.resolve().then(() => {
+          if (mounted) {
+            setUserData(JSON.parse(userString));
+          }
+        });
+      }
+    } catch (error) {
+      console.error("Error parsing user data:", error);
+    }
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const token = localStorage.getItem("access");
+
+    fetch(buildApiUrl("/departments/"), {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error("Error al traer departamentos");
+        return res.json();
+      })
+      .then((data) => {
+        setDepartmentos(data);
+      })
+      .catch((err) => console.error(err));
+  }, []);
+
+  useEffect(() => {
+    const token = localStorage.getItem("access");
+
+    let cancelled = false;
+    setFarmStatus("loading");
+
+    fetch(buildApiUrl(`/farms/${id}/`), {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+    })
+      .then(async (res) => {
+        if (cancelled) return;
+
+        if (res.status === 401) {
+          // sesión revocada o vencida en el servidor
+          clearSession();
+          router.replace("/login");
+          return;
+        }
+        // 404: no existe; 403/400: sin acceso o id inválido
+        if ([400, 403, 404].includes(res.status)) {
+          setFarmStatus("not_found");
+          return;
+        }
+        if (!res.ok) throw new Error(`Error ${res.status} al cargar granja`);
+
+        const data = await res.json();
+        if (cancelled) return;
+        if (!data || typeof data !== "object" || Object.keys(data).length === 0) {
+          setFarmStatus("not_found");
+          return;
+        }
+        setGranja(data);
+        setFarmStatus("ready");
+      })
+      .catch((err) => {
+        console.error(err);
+        if (!cancelled) setFarmStatus("error");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [id, farmReload, router]);
+
+  useEffect(() => {
+    fetch(buildApiUrl("/cities/"), {
+      headers: {
+        Authorization: `Bearer ${localStorage.getItem("access")}`,
+      },
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error("Error al traer ciudades");
+        return res.json();
+      })
+      .then((data) => {
+        setCiudades(data);
+      })
+      .catch((err) => console.error(err));
+  }, []);
+
+  const farmPermissions = usePermissions(id);
+
+  const isFarmOwner = farmPermissions.isOwner;
+
+  const isProductor =
+    farmPermissions.isProductor ||
+    userData?.role?.name === "Productor" ||
+    userData?.role === "Productor" ||
+    userData?.role?.name === "productor";
+
+  const isAdmin =
+    farmPermissions.isAdmin ||
+    userData?.role?.name === "Admin" ||
+    userData?.role === "Admin" ||
+    userData?.role?.name === "admin";
+
+  // El acceso total corresponde al administrador o al productor propietario de esta granja
+  const hasFullAccess =
+    farmPermissions.hasFullAccess ||
+    isAdmin ||
+    isFarmOwner;
+
+  const canManagePonds =
+    hasFullAccess ||
+    farmPermissions.canManagePonds;
+
+  const canManageCycles =
+    hasFullAccess ||
+    farmPermissions.canManageCycle;
+
+  const canManageFarm =
+    hasFullAccess ||
+    farmPermissions.canManageFarm;
+
+  const canManageInventory =
+    hasFullAccess ||
+    farmPermissions.canManageInventory;
+
+  const canManageSales =
+    hasFullAccess ||
+    farmPermissions.canManageSales;
+
+  const canManageUsers =
+    hasFullAccess ||
+    farmPermissions.canManageUsers;
+
+  const canViewProductionPlans =
+    hasFullAccess ||
+    farmPermissions.canView("production_cycles");
+  const canViewProductionBatches =
+    hasFullAccess ||
+    farmPermissions.canView("production_batches") ||
+    farmPermissions.canView("harvest_management");
+  const canViewFeedingSchedules =
+    hasFullAccess ||
+    farmPermissions.canView("feeding_management");
+
+  const canAccessPersonal =
+    canManageUsers ||
+    canManageFarm ||
+    farmPermissions.canViewAuditLogs ||
+    farmPermissions.canViewAlerts;
+
+  /* Pestañas principales.
+     - "panel": se muestra dentro de esta página.
+     - "href": abre la ruta existente (las rutas no cambian).
+     Los permisos son los mismos que tenían los botones originales. */
+  const mainTabs = [
+    {
+      key: "produccion",
+      label: "Producción",
+      icon: Factory,
+      visible:
+        canViewProductionPlans ||
+        canViewProductionBatches ||
+        canViewFeedingSchedules,
+    },
+    { key: "estanques", label: "Estanques", icon: Waves, visible: canManagePonds },
+    {
+      key: "inventario",
+      label: "Inventario",
+      icon: Package,
+      visible: canManageInventory,
+    },
+    {
+      key: "ventas",
+      label: "Ventas",
+      icon: Receipt,
+      visible: canManageSales,
+    },
+    {
+      key: "personal",
+      label: "Personal y Permisos",
+      icon: UserCog,
+      visible: canAccessPersonal,
+    },
+  ];
+
+  const subTabs = [
+    { key: "planes", label: "Planes", visible: canViewProductionPlans },
+    { key: "lotes", label: "Lotes", visible: canViewProductionBatches },
+    {
+      key: "cronogramas",
+      label: "Cronogramas",
+      icon: CalendarClock,
+      visible: canViewFeedingSchedules,
+    },
+  ];
+  const visibleMainTabs = mainTabs.filter((mainTab) => mainTab.visible);
+  const activeTab = visibleMainTabs.some((mainTab) => mainTab.key === tab)
+    ? tab
+    : visibleMainTabs[0]?.key;
+  const visibleSubTabs = subTabs.filter((subTabItem) => subTabItem.visible);
+  const activeSubTab = visibleSubTabs.some((item) => item.key === subTab)
+    ? subTab
+    : visibleSubTabs[0]?.key;
+
+  return (
+    <div className="relative min-h-screen bg-slate-50">
+      {farmStatus === "loading" && (
+        <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-white/60 backdrop-blur-sm">
+          <div className="bg-white p-6 rounded-xl shadow-2xl flex flex-col items-center">
+            <Loader2 className="h-12 w-12 text-blue-600 animate-spin" />
+            <p className="mt-4 font-medium text-slate-700">
+              Cargando granja...
+            </p>
+          </div>
+        </div>
+      )}
+
+      <div className="mx-auto max-w-5xl space-y-5 px-4 py-6 sm:px-6 lg:px-8">
+        {/* Volver */}
+        <a
+          href={"/home"}
+          className="inline-flex items-center gap-2 rounded text-sm text-slate-600 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          Volver a la Página de Inicio
+        </a>
+
+        {farmStatus === "not_found" && (
+          <EntityNotFound
+            entity="granja"
+            backHref="/home"
+            backLabel="Volver a mis granjas"
+          />
+        )}
+
+        {farmStatus === "error" && (
+          <LoadError
+            message="No se pudo cargar la granja. Revisa tu conexión e inténtalo de nuevo."
+            onRetry={() => setFarmReload((n) => n + 1)}
+          />
+        )}
+
+        {farmStatus === "ready" && (
+        <>
+        {/* CABECERA DE LA GRANJA */}
+        <header className="space-y-5 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+          <h1 className="text-2xl font-bold text-slate-900 sm:text-3xl">
+            {granja.name}
+          </h1>
+
+          <dl className="grid grid-cols-2 gap-x-6 gap-y-4 border-t border-slate-100 pt-4 sm:grid-cols-3 lg:grid-cols-5">
+            <InfoItem label="Departamento">
+              {departamentos.find((d) => d.id === granja.department)?.name || "—"}
+            </InfoItem>
+
+            <InfoItem label="Municipio">
+              {ciudades.find((c) => c.id === granja.city)?.name || "—"}
+            </InfoItem>
+
+            <InfoItem label="Área total">
+              {granja.total_area_ha} ha
+            </InfoItem>
+
+            <InfoItem label="Dirección">
+              {granja.address}
+            </InfoItem>
+
+            {granja.water_source?.length > 0 && (
+              <InfoItem label="Fuente hídrica">
+                {{
+                  river: "Río",
+                  stream: "Quebrada",
+                  lake: "Lago/Laguna",
+                  spring: "Manantial",
+                  reservoir: "Embalse",
+                  deep_well: "Pozo profundo",
+                  municipal: "Acueducto municipal",
+                  irrigation_canal: "Canal de riego",
+                }[granja.water_source] || granja.water_source}
+              </InfoItem>
+            )}
+          </dl>
+        </header>
+
+        {farmPermissions.permissionsError && (
+          <div
+            role="alert"
+            className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800"
+          >
+            {farmPermissions.permissionsError}
+          </div>
+        )}
+
+        {/* PESTAÑAS PRINCIPALES */}
+        <div
+          role="tablist"
+          aria-label="Secciones de la granja"
+          className="flex gap-1 overflow-x-auto border-b border-slate-200"
+        >
+          {visibleMainTabs.map((t) => {
+              const Icon = t.icon;
+              const isLink = Boolean(t.href);
+              const active = !isLink && activeTab === t.key;
+
+              return (
+                <button
+                  key={t.key}
+                  type="button"
+                  role="tab"
+                  id={`tab-${t.key}`}
+                  aria-selected={active}
+                  aria-controls={isLink ? undefined : `panel-${t.key}`}
+                  onClick={() =>
+                    isLink ? router.push(t.href) : setTab(t.key)
+                  }
+                  className={`flex items-center gap-2 whitespace-nowrap rounded-t border-b-2 px-4 py-2.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 ${
+                    active
+                      ? "border-blue-600 text-blue-700"
+                      : "border-transparent text-slate-500 hover:text-slate-800"
+                  }`}
+                >
+                  <Icon className="h-4 w-4" />
+                  {t.label}
+                  {isLink && (
+                    <ArrowUpRight className="h-3 w-3 text-slate-400" />
+                  )}
+                </button>
+              );
+            })}
+        </div>
+
+        {visibleMainTabs.length === 0 && !farmPermissions.loading && (
+          <p className="rounded-xl border border-slate-200 bg-white p-6 text-center text-sm text-slate-600">
+            No tienes módulos habilitados para esta granja.
+          </p>
+        )}
+
+        {/* ===== PRODUCCIÓN (con subpestañas) ===== */}
+        <div
+          role="tabpanel"
+          id="panel-produccion"
+          aria-labelledby="tab-produccion"
+          hidden={activeTab !== "produccion"}
+          className="space-y-5"
+        >
+          <div
+            role="tablist"
+            aria-label="Producción"
+            className="inline-flex max-w-full gap-1 overflow-x-auto rounded-lg bg-slate-200/70 p-1"
+          >
+            {visibleSubTabs.map((s) => {
+              const Icon = s.icon;
+              const isLink = Boolean(s.href);
+              const active = !isLink && activeSubTab === s.key;
+
+              return (
+                <button
+                  key={s.key}
+                  type="button"
+                  role="tab"
+                  id={`subtab-${s.key}`}
+                  aria-selected={active}
+                  aria-controls={isLink ? undefined : `subpanel-${s.key}`}
+                  onClick={() =>
+                    isLink ? router.push(s.href) : setSubTab(s.key)
+                  }
+                  className={`flex items-center gap-2 whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 ${
+                    active
+                      ? "bg-white text-blue-700 shadow-sm"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  {Icon && <Icon className="h-4 w-4" />}
+                  {s.label}
+                  {isLink && (
+                    <ArrowUpRight className="h-3 w-3 text-slate-400" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* PLANES */}
+          <section
+            role="tabpanel"
+            id="subpanel-planes"
+            aria-labelledby="subtab-planes"
+            hidden={activeSubTab !== "planes"}
+            className="space-y-4"
+          >
+            <ModuleHeader
+              title="Planes de producción"
+              description="Define los parámetros esperados para el cultivo."
+              action={
+                canManageCycles && (
+                  <Dialog>
+                    <form>
+                      <DialogTrigger asChild>
+                        <Button className={primaryBtn}>
+                          <Plus className="w-4 h-4" />
+                          Nuevo plan
+                        </Button>
+                      </DialogTrigger>
+
+                      <DialogContent className="sm:max-w-xl max-h-[90vh] overflow-y-auto">
+                        <DialogHeader>
+                          <DialogTitle>Registrar plan de producción</DialogTitle>
+
+                          <DialogDescription>
+                            Complete los detalles del nuevo plan de producción.
+                          </DialogDescription>
+                        </DialogHeader>
+
+                        <ProductionPlanForm
+                          op={1}
+                          farmProp={id}
+                        />
+                      </DialogContent>
+                    </form>
+                  </Dialog>
+                )
+              }
+            />
+
+            <SearchBox
+              id="input-search-plans"
+              label="Buscar plan"
+              placeholder="Buscar por nombre del plan..."
+              value={searchPlan}
+              onChange={setSearchPlan}
+            />
+
+            {activeTab === "produccion" &&
+              activeSubTab === "planes" &&
+              canViewProductionPlans && (
+                <ProductionPlans id={id} search={searchPlan} />
+              )}
+          </section>
+
+          {/* LOTES */}
+          <section
+            role="tabpanel"
+            id="subpanel-lotes"
+            aria-labelledby="subtab-lotes"
+            hidden={activeSubTab !== "lotes"}
+            className="space-y-4 pb-8"
+          >
+            <ModuleHeader
+              title="Lotes"
+              description="Gestiona los lotes de la granja (sin asociar a estanque)."
+              action={
+                canManagePonds && (
+                  <Dialog>
+                    <form>
+                      <DialogTrigger asChild>
+                        <Button className={primaryBtn}>
+                          <Plus className="w-4 h-4" />
+                          Crear lote
+                        </Button>
+                      </DialogTrigger>
+
+                      <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+                        <DialogHeader>
+                          <DialogTitle>Crear lote</DialogTitle>
+
+                          <DialogDescription>
+                            Escribe la información del lote que vas a crear. Haz
+                            click en crear cuando hayas terminado.
+                          </DialogDescription>
+                        </DialogHeader>
+
+                        <BatchRegisterForm
+                          op={1}
+                          idProp={""}
+                          idFarmProp={id}
+                          specieProp={""}
+                          biologicalStateProp={""}
+                          statusProp={""}
+                          initialQuantityProp={""}
+                          minWeightGProp={""}
+                          avgWeightGProp={""}
+                          maxWeightGProp={""}
+                          commentsProp={""}
+                        />
+                      </DialogContent>
+                    </form>
+                  </Dialog>
+                )
+              }
+            />
+
+            <SearchBox
+              id="input-search-batches"
+              label="Buscar lote"
+              placeholder="Buscar por estado o tipo..."
+              value={searchBatch}
+              onChange={setSearchBatch}
+            />
+
+            {activeTab === "produccion" &&
+              activeSubTab === "lotes" &&
+              canViewProductionBatches && (
+                <Batches id={id} search={searchBatch} />
+              )}
+          </section>
+
+          {/* CRONOGRAMAS (antes la página de Alimentación) */}
+          <section
+            role="tabpanel"
+            id="subpanel-cronogramas"
+            aria-labelledby="subtab-cronogramas"
+            hidden={activeSubTab !== "cronogramas"}
+            className="pb-8"
+          >
+            {activeTab === "produccion" &&
+              activeSubTab === "cronogramas" &&
+              canViewFeedingSchedules && (
+              <FeedingSchedules id={id} />
+            )}
+          </section>
+        </div>
+
+        {/* ===== ESTANQUES ===== */}
+        <section
+          role="tabpanel"
+          id="panel-estanques"
+          aria-labelledby="tab-estanques"
+          hidden={activeTab !== "estanques"}
+          className="space-y-4 pb-8"
+        >
+          <ModuleHeader
+            title="Estanques"
+            description="Selecciona un estanque para ver especies y calidad del agua."
+            action={
+              canManagePonds && (
+                <Dialog>
+                  <form>
+                    <DialogTrigger asChild>
+                      <Button className={primaryBtn}>
+                        <Plus className="w-4 h-4" />
+                        Agregar estanque
+                      </Button>
+                    </DialogTrigger>
+
+                    <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+                      <DialogHeader>
+                        <DialogTitle>Agregar estanque</DialogTitle>
+
+                        <DialogDescription>
+                          Escribe la información del estanque que vas a agregar. Haz
+                          click en crear cuando hayas terminado.
+                        </DialogDescription>
+                      </DialogHeader>
+
+                      <PondRegisterForm
+                        op={1}
+                        idProp={""}
+                        idFarmProp={id}
+                        nombreProp={""}
+                        capacidadProp={""}
+                        areaProp={""}
+                        volumenProp={""}
+                        profundidadProp={""}
+                        descripcionProp={""}
+                      />
+                    </DialogContent>
+                  </form>
+                </Dialog>
+              )
+            }
+          />
+
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <SearchBox
+              id="input-button-group"
+              label="Buscar estanque"
+              placeholder="Buscar por nombre del estanque..."
+              value={search}
+              onChange={setSearch}
+            />
+
+            <Select value={filter} onValueChange={setFilter}>
+              <SelectTrigger className="w-full sm:w-48">
+                <SelectValue placeholder="Filtrar por estado" />
+              </SelectTrigger>
+
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value="all">Todos</SelectItem>
+                  <SelectItem value="active">Activo</SelectItem>
+                  <SelectItem value="inactive">Inactivo</SelectItem>
+                  <SelectItem value="cleaning">En Limpieza</SelectItem>
+                  <SelectItem value="in_use">En Uso</SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </div>
+
+          {activeTab === "estanques" && canManagePonds && (
+            <Ponds id={id} search={search} filter={filter} />
+          )}
+        </section>
+
+        {/* ===== INVENTARIO (antes /inventory) ===== */}
+        <section
+          role="tabpanel"
+          id="panel-inventario"
+          aria-labelledby="tab-inventario"
+          hidden={activeTab !== "inventario"}
+          className="pb-8"
+        >
+          {activeTab === "inventario" && canManageInventory && (
+            <Suspense fallback={<div>Cargando...</div>}>
+              <InventoryContent
+                farmId={id}
+                canViewProducts={
+                  hasFullAccess || farmPermissions.canView("inventory_products")
+                }
+                canViewPurchases={
+                  hasFullAccess || farmPermissions.canView("inventory_purchases")
+                }
+              />
+            </Suspense>
+          )}
+        </section>
+
+        {/* ===== VENTAS (antes /sales) ===== */}
+        <section
+          role="tabpanel"
+          id="panel-ventas"
+          aria-labelledby="tab-ventas"
+          hidden={activeTab !== "ventas"}
+          className="pb-8"
+        >
+          {activeTab === "ventas" && canManageSales && (
+            <Suspense fallback={<div>Cargando...</div>}>
+              <SalesContent farmId={id} />
+            </Suspense>
+          )}
+        </section>
+
+        {/* ===== PERSONAL (antes la página de Trabajadores) ===== */}
+        <section
+          role="tabpanel"
+          id="panel-personal"
+          aria-labelledby="tab-personal"
+          hidden={activeTab !== "personal"}
+          className="pb-8"
+        >
+          {activeTab === "personal" && canAccessPersonal && (
+            <FarmWorkers id={id} />
+          )}
+        </section>
+        </>
+        )}
+      </div>
+    </div>
+  );
+}
