@@ -178,6 +178,67 @@ class BatchRouteIntegrationTests(TestCase):
         self.batch.refresh_from_db()
         self.assertEqual(self.batch.initial_quantity, 100)
 
+    def test_partial_first_pond_assignment_keeps_remainder_available(self):
+        batch = Batch.objects.create(
+            farm=self.farm,
+            specie=self.specie,
+            code="B-ASIGNACION-PARCIAL",
+            biological_state=Batch.BiologicalState.ALEVIN,
+            initial_quantity=100,
+            min_weight_g=10,
+            avg_weight_g=12,
+            max_weight_g=14,
+        )
+        destination = Pond.objects.create(
+            farm=self.farm,
+            name="Destino asignación parcial",
+            type=Pond.Type.CONCRETE,
+            capacity=500,
+            area=100,
+            volume=100,
+            depth=1,
+            status=Pond.Status.ACTIVE,
+        )
+
+        response = self.client.post(
+            f"/api/farms/{self.farm.pk}/pond-batches/",
+            {
+                "pond": destination.pk,
+                "batch": batch.pk,
+                "initial_quantity": 60,
+                "start_date": str(date.today()),
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201, response.data)
+        batch.refresh_from_db()
+        self.assertEqual(batch.initial_quantity, 60)
+        self.assertEqual(response.data["current_quantity"], 60)
+        split_result = response.data["split_result"]
+        self.assertTrue(split_result["was_split"])
+        self.assertEqual(split_result["assigned_quantity"], 60)
+        self.assertEqual(split_result["remainder_quantity"], 40)
+        child = Batch.objects.get(pk=split_result["remainder_batch"]["id"])
+        self.assertEqual(child.initial_quantity, 40)
+        self.assertFalse(PondBatch.objects.filter(batch=child).exists())
+        link = BatchSource.objects.get(parent_batch=batch, child_batch=child)
+        self.assertEqual(link.quantity, 40)
+
+        available = self.client.get(
+            f"/api/farms/{self.farm.pk}/batches/?sin_estanque=true"
+        )
+        available_ids = [item["id"] for item in available.data]
+        self.assertNotIn(batch.pk, available_ids)
+        self.assertIn(child.pk, available_ids)
+
+        traceability = self.client.get(
+            f"/api/farms/{self.farm.pk}/batches/{child.pk}/traceability/"
+        )
+        self.assertEqual(traceability.status_code, 200)
+        self.assertEqual(traceability.data["genealogy"][0]["parent_id"], batch.pk)
+        self.assertEqual(traceability.data["genealogy"][0]["child_id"], child.pk)
+
     def test_cycle_only_allows_estimated_finish_and_comments(self):
         detail_url = (
             f"/api/farms/{self.farm.pk}/ponds/{self.pond.pk}/"
@@ -643,6 +704,18 @@ class BatchRouteIntegrationTests(TestCase):
         self.assertEqual(response.data["source_batch_id"], batch.pk)
         self.assertEqual(response.data["destination_batch_id"], batch.pk)
         self.assertFalse(BatchSource.objects.filter(parent_batch=batch).exists())
+        active_at_source = self.client.get(
+            f"/api/farms/{self.farm.pk}/pond-batches/?pond={source_pond.pk}&activos=true"
+        )
+        self.assertNotIn(source.pk, [item["id"] for item in active_at_source.data])
+        source_history = self.client.get(
+            f"/api/farms/{self.farm.pk}/pond-batches/?pond={source_pond.pk}"
+        )
+        history_item = next(
+            item for item in source_history.data if item["id"] == source.pk
+        )
+        self.assertEqual(history_item["current_quantity"], 0)
+        self.assertEqual(history_item["end_date"], str(date.today()))
 
     def test_manual_transfer_rejects_other_species_and_life_stage(self):
         source_pond = Pond.objects.create(

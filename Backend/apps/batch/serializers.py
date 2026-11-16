@@ -205,6 +205,8 @@ class BatchSourceSerializer(serializers.ModelSerializer):
 
 
 class PondBatchSerializer(serializers.ModelSerializer):
+    split_result = serializers.SerializerMethodField()
+
     class Meta:
         model = PondBatch
         fields = [
@@ -215,8 +217,12 @@ class PondBatchSerializer(serializers.ModelSerializer):
             "current_quantity",
             "start_date",
             "end_date",
+            "split_result",
         ]
         read_only_fields = ["current_quantity"]
+
+    def get_split_result(self, instance) -> dict | None:
+        return getattr(instance, "_split_result", None)
 
     def validate(self, data):
         if self.instance is not None:
@@ -264,6 +270,29 @@ class PondBatchSerializer(serializers.ModelSerializer):
                     "batch": f"El lote no está activo. Estado actual: '{batch.get_status_display()}'."
                 }
             )
+
+        if self.instance is None and batch:
+            if cantidad_nueva > batch.initial_quantity:
+                raise serializers.ValidationError(
+                    {
+                        "initial_quantity": (
+                            f"La cantidad excede la disponible en el lote "
+                            f"({batch.initial_quantity})."
+                        )
+                    }
+                )
+            if (
+                cantidad_nueva < batch.initial_quantity
+                and PondBatch.objects.filter(batch=batch).exists()
+            ):
+                raise serializers.ValidationError(
+                    {
+                        "initial_quantity": (
+                            "La división automática solo aplica antes de la primera "
+                            "asignación del lote."
+                        )
+                    }
+                )
 
         if batch:
             asignaciones_activas = PondBatch.objects.filter(
@@ -353,9 +382,78 @@ class PondBatchSerializer(serializers.ModelSerializer):
 
         return data
 
+    @transaction.atomic
     def create(self, validated_data):
-        validated_data["current_quantity"] = validated_data["initial_quantity"]
+        batch = Batch.objects.select_for_update().get(pk=validated_data["batch"].pk)
+        assigned_quantity = validated_data["initial_quantity"]
+        split_result = None
+
+        if assigned_quantity > batch.initial_quantity:
+            raise serializers.ValidationError(
+                {"initial_quantity": "La disponibilidad cambió; vuelve a consultar el lote."}
+            )
+
+        has_previous_assignment = PondBatch.objects.filter(batch=batch).exists()
+        remainder = batch.initial_quantity - assigned_quantity
+        if remainder and not has_previous_assignment:
+            original_quantity = batch.initial_quantity
+            timestamp = int(timezone.now().timestamp())
+            base_code = f"{batch.code[:30]}-R{timestamp}"
+            child_code = base_code[:50]
+            suffix = 1
+            while Batch.objects.filter(farm=batch.farm, code=child_code).exists():
+                suffix += 1
+                child_code = f"{base_code[:45]}-{suffix}"[:50]
+
+            child = Batch.objects.create(
+                farm=batch.farm,
+                specie=batch.specie,
+                origin_type=Batch.OriginType.BATCH_SPLIT,
+                origin_id=batch.pk,
+                code=child_code,
+                biological_state=batch.biological_state,
+                status=Batch.Status.ACTIVE,
+                comments=(
+                    "Remanente disponible tras asignación parcial del lote "
+                    f"{batch.code} a un estanque."
+                ),
+                initial_quantity=remainder,
+                min_weight_g=batch.min_weight_g,
+                avg_weight_g=batch.avg_weight_g,
+                max_weight_g=batch.max_weight_g,
+            )
+            BatchSource.objects.create(
+                parent_batch=batch,
+                child_batch=child,
+                quantity=remainder,
+            )
+            batch.initial_quantity = assigned_quantity
+            batch.save(update_fields=["initial_quantity", "updated_at"])
+            split_result = {
+                "was_split": True,
+                "original_quantity": original_quantity,
+                "assigned_batch": BatchSerializer(batch).data,
+                "assigned_quantity": assigned_quantity,
+                "remainder_batch": BatchSerializer(child).data,
+                "remainder_quantity": remainder,
+                "genealogy": {
+                    "parent_batch_id": batch.pk,
+                    "child_batch_id": child.pk,
+                },
+            }
+        elif remainder and has_previous_assignment:
+            raise serializers.ValidationError(
+                {
+                    "initial_quantity": (
+                        "No se puede dividir parcialmente un lote con asignaciones previas."
+                    )
+                }
+            )
+
+        validated_data["batch"] = batch
+        validated_data["current_quantity"] = assigned_quantity
         pond_batch = super().create(validated_data)
+        pond_batch._split_result = split_result
 
         # Cambiar el estado del estanque a IN_USE
         pond = pond_batch.pond

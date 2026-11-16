@@ -10,7 +10,7 @@ Se corrigieron los errores de integración confirmados entre el Backend y el Fro
 
 La validación final se realizó exclusivamente dentro de Docker:
 
-- **Backend:** 100 pruebas ejecutadas, 100 aprobadas.
+- **Backend:** 101 pruebas ejecutadas, 101 aprobadas.
 - **OpenAPI:** esquema generado y validado con **0 errores**. Permanecen 50 advertencias únicas no bloqueantes de tipado inferido, nombres de enums y `operationId`.
 - **Frontend:** compilación de producción correcta para todas las rutas.
 - **Lint del Frontend:** 0 errores y 15 advertencias heredadas no bloqueantes.
@@ -161,7 +161,7 @@ Todas las ejecuciones se realizaron en Docker.
 | `docker compose config --quiet` | Correcto |
 | Build de imagen Backend | Correcto |
 | Build de producción Frontend | Correcto; todas las rutas compiladas |
-| Suite Django | 100/100 pruebas aprobadas |
+| Suite Django | 101/101 pruebas aprobadas |
 | Validación OpenAPI | 0 errores; 50 advertencias únicas |
 | ESLint | 0 errores; 15 advertencias |
 | Estado de Compose | `db`, `backend` y `frontend` saludables |
@@ -428,3 +428,70 @@ El endpoint solo acepta lotes activos que nunca hayan sido asignados a un estanq
 9. Asignar el lote de `600` al Estanque A y el de `400` al Estanque B.
 
 **Validaciones:** no se permite separar `0`, una cantidad negativa, una cantidad igual o superior al total, un lote inactivo o un lote que ya haya estado asignado a un estanque. Una petición rechazada no modifica cantidades ni crea genealogía.
+
+### 9.14. Remanente visible al asignar parcialmente y cierre de la asignación transferida
+
+Se corrigió el caso en que **Asignar a Estanque** aceptaba una cantidad menor al total, pero el sistema vinculaba el lote original al estanque y dejaba invisible la cantidad no utilizada. También se corrigió la presentación de una transferencia total: cuando la relación del lote con el estanque origen llega a cero, deja de mostrarse como activa en ese estanque.
+
+#### Backend
+
+[apps/batch/serializers.py](Backend/apps/batch/serializers.py) divide automáticamente el lote dentro de la misma transacción cuando su primera asignación a un estanque utiliza una cantidad parcial:
+
+1. el lote original conserva la cantidad que efectivamente se asigna;
+2. se crea un lote hijo activo con la cantidad restante;
+3. se registra la relación padre → hijo en `BatchSource`;
+4. el hijo queda sin estanque y, por tanto, continúa disponible en la pestaña **Lotes**;
+5. la respuesta incluye `split_result` con códigos, cantidades e identificadores genealógicos;
+6. si cualquier paso falla, no se crea la asignación ni se alteran las cantidades.
+
+La división automática solo se permite en la primera asignación del lote. De este modo no se reconstruye artificialmente la historia de un lote que ya haya estado en uno o más estanques. [apps/batch/tests.py](Backend/apps/batch/tests.py) comprueba un lote de `100` peces asignado parcialmente con `60`: el padre queda con `60`, el hijo con `40`, el hijo aparece en `?sin_estanque=true` y la trazabilidad expone su genealogía.
+
+En una transferencia total, el Backend ya establece `current_quantity = 0` y `end_date` en la asignación del estanque origen. El lote global no se marca como inactivo porque sigue existiendo, con el mismo código, en el estanque destino; lo que termina es únicamente su relación con el origen. La prueba de transferencia total comprueba que esa relación no aparece en `?activos=true`, pero sí permanece consultable en el historial.
+
+#### Frontend
+
+[src/app/components/ponds/assign_pond_form.jsx](Frontend/src/app/components/ponds/assign_pond_form.jsx) informa antes de confirmar que una cantidad menor generará un lote hijo. Después de una asignación parcial muestra una confirmación persistente con:
+
+- código y cantidad del lote asignado;
+- código y cantidad del remanente disponible;
+- indicación de la genealogía creada;
+- botón **Ver lote asignado**;
+- botón **Ver remanente disponible**.
+
+El selector solo presenta estanques activos o en uso, sin ciclo activo, que estén vacíos o contengan exactamente la misma especie y etapa biológica. El formulario limita además la cantidad al total disponible y ya no permite definir una fecha de finalización al crear la asignación.
+
+[src/app/components/batches/batches.jsx](Frontend/src/app/components/batches/batches.jsx) evalúa el estado de cada asignación al estanque además del estado global del lote. Una relación con fecha de fin o cantidad cero:
+
+- desaparece de **Lotes activos** del estanque origen;
+- aparece en **Historial** con la etiqueta **Trasladado / finalizado en este estanque**;
+- no permite editar, vincular a ciclo ni volver a transferir desde el origen;
+- no afecta la tarjeta activa del mismo lote en el estanque destino.
+
+#### Cómo probar la asignación parcial y el remanente
+
+1. Crear o comprar un lote activo de `1.000` peces y dejarlo sin estanque.
+2. Abrir **Granja → Lotes** y pulsar **Asignar a Estanque** en su tarjeta.
+3. Elegir un estanque compatible, escribir `600` en **Cantidad que se asignará**, seleccionar la fecha actual y pulsar **Asignar**.
+4. Confirmar que no ocurre una recarga inmediata: debe aparecer **Asignación parcial y división completadas**.
+5. Verificar en la confirmación el lote original con `600` peces y un nuevo código de remanente con `400` peces.
+6. Pulsar **Ver remanente disponible**. En **Granja → Lotes** debe aparecer la tarjeta hija de `400` peces con el botón **Asignar a Estanque**.
+7. Abrir **Ver trazabilidad** en el lote de `600` o en el de `400`. La sección **Genealogía** debe mostrar la relación padre → hijo y la cantidad separada de `400` peces.
+8. Como control, repetir con otro lote asignando su cantidad completa: no debe crearse hijo y la confirmación debe indicar únicamente que el lote fue asignado.
+
+#### Cómo probar el cierre después de una transferencia total
+
+1. Tener un lote activo de `500` peces en el Estanque A, sin ciclo activo o pausado, y un Estanque B compatible.
+2. Abrir **Estanque A → Lotes activos → Transferir a otro estanque**.
+3. Elegir el Estanque B, escribir `500`, indicar la fecha y el motivo `Traslado total`, y pulsar **Confirmar transferencia**.
+4. La confirmación debe indicar **Transferencia total del lote** y conservar el mismo código.
+5. Volver al Estanque A: el lote ya no debe aparecer en **Lotes activos**.
+6. Abrir **Historial** en el Estanque A: debe aparecer con cantidad actual `0` y la etiqueta **Trasladado / finalizado en este estanque**, sin botones para editar, vincular o transferir.
+7. Abrir el Estanque B: el mismo código debe aparecer activo con `500` peces. Esto confirma que terminó la asignación de origen, no la vida global del lote.
+
+#### Verificación ejecutada en Docker
+
+- compilación de producción del Frontend: correcta;
+- ESLint: `0` errores y `15` advertencias heredadas;
+- pruebas enfocadas de asignación parcial y transferencia total: `2/2` aprobadas;
+- suite completa Django: `101/101` pruebas aprobadas;
+- `manage.py check`: sin problemas del sistema.

@@ -111,8 +111,10 @@ export function Batches({ id, pondId, cycleId, search = "", statusFilter = null 
         } else if (typeof item.batch === 'object' && item.batch !== null) {
           b = item.batch;
         }
-        if (statusFilter === "active") return b.status === "active";
-        return b.status !== "active"; // history: everything else
+        const isPondAssignment = typeof item.batch === 'object' && item.batch !== null && !item.pond_batch_detail;
+        const assignmentEnded = isPondAssignment && (!!item.end_date || Number(item.current_quantity) <= 0);
+        if (statusFilter === "active") return b.status === "active" && !assignmentEnded;
+        return b.status !== "active" || assignmentEnded;
       });
     }
 
@@ -298,6 +300,7 @@ export function Batches({ id, pondId, cycleId, search = "", statusFilter = null 
         {filteredBatches.map((item) => {
           const isCycleBatch = !!item.pond_batch_detail;
           const isPondBatch = typeof item.batch === 'object' && item.batch !== null && !isCycleBatch;
+          const assignmentEnded = isPondBatch && (!!item.end_date || Number(item.current_quantity) <= 0);
 
           const b = isCycleBatch ? item.pond_batch_detail.batch : (isPondBatch ? item.batch : item);
           const displayId = b.id || item.id;
@@ -344,7 +347,7 @@ export function Batches({ id, pondId, cycleId, search = "", statusFilter = null 
                       <GitBranch />
                     </button>
 
-                    {!isCycleBatch && !item.assigned_cycle && !b.active_cycle && <AlertDialog>
+                    {!isCycleBatch && !assignmentEnded && !item.assigned_cycle && !b.active_cycle && <AlertDialog>
                       <AlertDialogTrigger asChild>
                         <Pencil className="text-blue-600 cursor-pointer hover:text-blue-700 transition-colors" />
                       </AlertDialogTrigger>
@@ -395,10 +398,12 @@ export function Batches({ id, pondId, cycleId, search = "", statusFilter = null 
               <CardFooter className="flex flex-col gap-4 items-start">
                 <div className="w-full flex justify-between items-center">
                   <p
-                    className={`capitalize px-3 py-1 rounded-full text-sm font-semibold ${STATUS_COLORS[b.status] || "bg-gray-100 text-gray-700"
+                    className={`capitalize px-3 py-1 rounded-full text-sm font-semibold ${assignmentEnded
+                      ? "bg-slate-100 text-slate-700"
+                      : STATUS_COLORS[b.status] || "bg-gray-100 text-gray-700"
                       }`}
                   >
-                    {STATUS_LABELS[b.status] || b.status}
+                    {assignmentEnded ? "Trasladado / finalizado en este estanque" : STATUS_LABELS[b.status] || b.status}
                   </p>
                 </div>
 
@@ -421,6 +426,8 @@ export function Batches({ id, pondId, cycleId, search = "", statusFilter = null 
                         farmId={id}
                         batchId={b.id}
                         defaultQuantity={b.initial_quantity}
+                        sourceSpecieId={b.specie?.id || b.specie}
+                        sourceBiologicalState={b.biological_state}
                       />
                     </DialogContent>
                   </Dialog>
@@ -448,7 +455,7 @@ export function Batches({ id, pondId, cycleId, search = "", statusFilter = null 
                     </DialogContent>
                   </Dialog>
                 )}
-                {!!pondId && !cycleId && !item.assigned_cycle && !b.active_cycle && (
+                {!!pondId && !cycleId && !assignmentEnded && !item.assigned_cycle && !b.active_cycle && (
                   <Dialog>
                     <DialogTrigger asChild>
                       <Button variant="outline" className="w-full flex gap-2 border-green-200 text-green-700 hover:bg-green-50">
@@ -472,7 +479,7 @@ export function Batches({ id, pondId, cycleId, search = "", statusFilter = null 
                     </DialogContent>
                   </Dialog>
                 )}
-                {!!pondId && !cycleId && isPondBatch && !item.assigned_cycle && !b.active_cycle && displayQuantity > 0 && (
+                {!!pondId && !cycleId && isPondBatch && !assignmentEnded && !item.assigned_cycle && !b.active_cycle && displayQuantity > 0 && (
                   <Dialog>
                     <DialogTrigger asChild>
                       <Button variant="outline" className="w-full border-amber-200 text-amber-700 hover:bg-amber-50">
