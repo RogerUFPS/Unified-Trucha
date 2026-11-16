@@ -10,7 +10,7 @@ Se corrigieron los errores de integración confirmados entre el Backend y el Fro
 
 La validación final se realizó exclusivamente dentro de Docker:
 
-- **Backend:** 95 pruebas ejecutadas, 95 aprobadas.
+- **Backend:** 100 pruebas ejecutadas, 100 aprobadas.
 - **OpenAPI:** esquema generado y validado con **0 errores**. Permanecen 50 advertencias únicas no bloqueantes de tipado inferido, nombres de enums y `operationId`.
 - **Frontend:** compilación de producción correcta para todas las rutas.
 - **Lint del Frontend:** 0 errores y 15 advertencias heredadas no bloqueantes.
@@ -140,7 +140,7 @@ El volumen `piscicola_postgres_data` conserva la base de datos local entre reini
 
 ## 5. Endpoints sin pantalla nueva
 
-La auditoría encontró capacidades del Backend sin una interfaz directa, entre ellas administración completa de referencias de especies, estadísticas diarias y asignación de miembros por estanque. Las transferencias manuales y eventos de clasificación que movían peces entre estanques se deshabilitaron: el traslado permitido se genera automáticamente y con trazabilidad únicamente para el remanente de una vinculación parcial al ciclo.
+La auditoría encontró capacidades del Backend sin una interfaz directa, entre ellas administración completa de referencias de especies, estadísticas diarias y asignación de miembros por estanque. Los eventos manuales de clasificación dentro de ciclos permanecen deshabilitados. Las transferencias manuales se habilitaron posteriormente solo para lotes que no estén comprometidos con ciclos activos o pausados, mientras que el remanente de una vinculación parcial se sigue trasladando obligatoriamente y de forma automática.
 
 No se añadieron pantallas aisladas para estas capacidades porque no existe todavía una ubicación funcional ni un flujo de producto definido que determine:
 
@@ -161,7 +161,7 @@ Todas las ejecuciones se realizaron en Docker.
 | `docker compose config --quiet` | Correcto |
 | Build de imagen Backend | Correcto |
 | Build de producción Frontend | Correcto; todas las rutas compiladas |
-| Suite Django | 95/95 pruebas aprobadas |
+| Suite Django | 100/100 pruebas aprobadas |
 | Validación OpenAPI | 0 errores; 50 advertencias únicas |
 | ESLint | 0 errores; 15 advertencias |
 | Estado de Compose | `db`, `backend` y `frontend` saludables |
@@ -257,7 +257,7 @@ Se eliminaron los bloqueos que impedían superar `estimated_finish_date` en [app
 5. registra un `BatchTransfer` automático;
 6. revierte todo si cualquier validación falla.
 
-[apps/batch/models.py](Backend/apps/batch/models.py) incorpora el origen `batch_split`. Las transferencias y clasificaciones manuales quedaron deshabilitadas en [apps/batch/views.py](Backend/apps/batch/views.py) y [apps/events/views.py](Backend/apps/events/views.py).
+[apps/batch/models.py](Backend/apps/batch/models.py) incorpora el origen `batch_split`. Los eventos manuales de clasificación permanecen deshabilitados en [apps/events/views.py](Backend/apps/events/views.py). Las transferencias manuales se habilitaron exclusivamente para lotes fuera de ciclos activos o pausados, como se detalla en la sección 9.11.
 
 **Frontend:** [src/app/components/cycles/assign_cycle_form.jsx](Frontend/src/app/components/cycles/assign_cycle_form.jsx) solicita cantidad y, solo cuando existe remanente, obliga a elegir un estanque activo y vacío.
 
@@ -318,3 +318,113 @@ GET /api/farms/{farm_id}/batches/{batch_id}/traceability/
 4. Como control negativo, una petición desde otro origen no debe recibir la cabecera `Access-Control-Allow-Origin`.
 
 En la verificación final ambos servicios respondieron `HTTP 200`; el origen local recibió `Access-Control-Allow-Origin: http://localhost:3000` y un origen externo de prueba no recibió autorización CORS.
+
+### 9.10. Confirmación visible de la división y acceso a ambos lotes
+
+Se corrigió un problema de experiencia de usuario: el Backend sí dividía y trasladaba el remanente, pero el `POST` devolvía únicamente la asignación al ciclo y el Frontend recargaba la página sin explicar dónde quedaron las dos partes. En una vista de lotes sin estanque ambos podían dejar de aparecer porque, correctamente, ya estaban asignados; esto se percibía como pérdida del lote.
+
+**Backend:** [apps/cycle/serializers.py](Backend/apps/cycle/serializers.py) incluye ahora `split_result` en la respuesta de creación con lote origen, cantidad incorporada al ciclo, lote derivado, cantidad remanente, estanque destino y relación genealógica. [apps/batch/tests.py](Backend/apps/batch/tests.py) comprueba que:
+
+- el lote origen continúa en su estanque y con la cantidad usada por el ciclo;
+- el lote remanente aparece en el estanque seleccionado;
+- la genealogía padre → hijo se obtiene consultando cualquiera de los dos lotes;
+- la cantidad de la relación coincide con el remanente trasladado.
+
+**Frontend:** [src/app/components/cycles/assign_cycle_form.jsx](Frontend/src/app/components/cycles/assign_cycle_form.jsx) ya no hace una recarga ciega. Después de dividir muestra una confirmación persistente con las dos tarjetas, códigos, cantidades, estanques y la flecha genealógica. Incluye **Ver lote dentro del ciclo** y **Ver lote remanente** para abrir directamente cada ubicación. [src/app/components/batches/BatchTraceabilityModal.jsx](Frontend/src/app/components/batches/BatchTraceabilityModal.jsx) diferencia visualmente `Origen` y `Remanente` e indica la cantidad separada.
+
+**Cómo probarlo:**
+
+1. En un estanque con un lote de `1.000` peces y un ciclo en progreso, pulsar **Vincular a Ciclo**.
+2. Ingresar `600` y seleccionar otro estanque activo como destino.
+3. Pulsar **Vincular a Ciclo**. No debe producirse una recarga inmediata.
+4. Confirmar que aparece **Lote dividido correctamente**, con `600` peces en el lote origen y `400` en el remanente, sus códigos y estanques.
+5. Pulsar **Ver lote dentro del ciclo** y comprobar el lote de `600` peces.
+6. Repetir el flujo y pulsar **Ver lote remanente**, o volver a la confirmación con un caso nuevo; debe abrir el estanque destino y mostrar el lote derivado de `400` peces.
+7. En cualquiera de los dos lotes, pulsar **Ver trazabilidad**. La sección **Genealogía** debe mostrar `Origen: <código padre> → Remanente: <código hijo>` y `Cantidad separada: 400 peces`.
+
+### 9.11. Transferencias manuales e historial visual
+
+Se habilitaron las transferencias manuales solicitadas sin modificar lotes que ya formen parte de un ciclo activo o pausado. El traslado obligatorio del remanente al iniciar parcialmente un ciclo continúa funcionando de manera automática.
+
+**Backend:** [apps/batch/serializers.py](Backend/apps/batch/serializers.py) implementa la operación atómica y valida granja, disponibilidad, capacidad, especie, etapa biológica, estado de los estanques y ausencia de ciclos activos/pausados. [apps/batch/views.py](Backend/apps/batch/views.py) habilita `POST /api/farms/{farm_id}/batch-transfers/` y devuelve nombres, códigos y estanques para su presentación. El comportamiento es:
+
+- transferencia parcial: descuenta la cantidad del origen, crea un lote hijo en el destino y registra `BatchSource`;
+- transferencia total: cierra la asignación anterior y conserva el mismo lote en el nuevo estanque;
+- ambos casos registran `BatchTransfer`, actualizan los estados de los estanques y aparecen en trazabilidad;
+- un lote dentro de un ciclo activo/pausado es rechazado por el Backend aunque se intente invocar el endpoint directamente.
+
+**Frontend:** [src/app/components/batches/BatchTransferForm.jsx](Frontend/src/app/components/batches/BatchTransferForm.jsx) agrega el botón **Transferir a otro estanque**, selector de destino, cantidad, fecha y motivo. [src/app/components/batches/BatchTransferHistoryModal.jsx](Frontend/src/app/components/batches/BatchTransferHistoryModal.jsx) presenta movimientos automáticos y manuales del estanque. [src/app/components/batches/batches.jsx](Frontend/src/app/components/batches/batches.jsx) oculta el botón cuando el lote está comprometido con un ciclo. [src/lib/batchTransferService.js](Frontend/src/lib/batchTransferService.js) conecta ambas interfaces con el API.
+
+**Cómo probar una transferencia parcial:**
+
+1. Crear o utilizar un lote activo de `1.000` peces asignado a un estanque, sin vincularlo a ningún ciclo.
+2. Disponer de otro estanque activo o en uso, sin ciclo activo/pausado, con capacidad suficiente y sin peces incompatibles.
+3. Abrir **Granja → Estanque origen → Lotes activos** y pulsar **Transferir a otro estanque**.
+4. Elegir el estanque destino, ingresar `300`, seleccionar la fecha actual y escribir `Redistribución por densidad`.
+5. Pulsar **Confirmar transferencia**. Debe indicar **Transferencia parcial con lote derivado**, mostrar el código padre y el nuevo código hijo.
+6. Pulsar **Ver lote en estanque destino**; deben aparecer `300` peces. En el origen deben permanecer `700`.
+7. Abrir **Ver trazabilidad** en cualquiera de los lotes y confirmar la relación genealógica y el movimiento.
+
+**Cómo probar una transferencia total y el historial:**
+
+1. Repetir el formulario ingresando toda la cantidad disponible.
+2. La confirmación debe indicar **Transferencia total del lote** y conservar el mismo código.
+3. El origen debe quedar sin ese lote activo y el destino debe mostrarlo con la cantidad completa.
+4. Pulsar **Historial de transferencias** en cualquiera de los estanques involucrados. Deben aparecer origen, destino, fecha, cantidad, códigos, motivo y si el movimiento fue parcial o total.
+
+**Cómo probar el bloqueo:** vincular un lote a un ciclo en progreso y volver a la lista del estanque. El botón **Transferir a otro estanque** no debe aparecer. Una petición directa al endpoint con ese `source_pond_batch` debe responder `400`.
+
+### 9.12. Exclusividad de especie y etapa biológica por estanque
+
+Cada estanque puede contener simultáneamente varios lotes únicamente cuando todos pertenecen a la misma especie exacta y a la misma etapa biológica. Por ejemplo, `Cachama blanca` y `Cachama negra` son especies diferentes y no pueden convivir; tampoco pueden convivir alevines y peces en levante aunque pertenezcan a la misma especie.
+
+**Backend:** [apps/batch/serializers.py](Backend/apps/batch/serializers.py) rechaza la transferencia si cualquier lote activo del estanque destino tiene un `specie_id` o `biological_state` diferente. La regla se comprueba durante la validación y nuevamente dentro de la transacción, después de bloquear el destino, para evitar que una modificación concurrente permita mezclar peces incompatibles. La misma regla ya se aplica al asignar directamente lotes mediante [apps/batch/serializers.py](Backend/apps/batch/serializers.py).
+
+[apps/ponds/serializers.py](Backend/apps/ponds/serializers.py) expone `resident_profile` con especie, etapa y cantidad actual para que la interfaz pueda identificar la ocupación compatible del estanque. [apps/batch/tests.py](Backend/apps/batch/tests.py) verifica explícitamente los dos rechazos y confirma que no se descuenta ningún pez ni se registra una transferencia fallida.
+
+**Frontend:** [src/app/components/batches/BatchTransferForm.jsx](Frontend/src/app/components/batches/BatchTransferForm.jsx) filtra los destinos antes de mostrar el selector. Solo aparecen estanques vacíos o estanques ocupados exclusivamente por la misma especie y etapa del lote origen. Cada opción ocupada muestra especie, etapa y cantidad residente.
+
+**Cómo probar especie diferente:**
+
+1. Crear un lote de `Cachama blanca`, etapa `Alevín`, con `100` peces en el Estanque A.
+2. Crear un lote de `Cachama negra`, etapa `Alevín`, en el Estanque B.
+3. En **Estanque A → Lotes activos**, pulsar **Transferir a otro estanque**.
+4. Confirmar que el Estanque B no aparece como destino.
+5. Como comprobación del Backend, enviar directamente la transferencia hacia el Estanque B; debe responder `400` indicando que contiene otra especie o etapa y el lote origen debe conservar los `100` peces.
+
+**Cómo probar etapa diferente:**
+
+1. Mantener el lote origen como `Cachama blanca / Alevín`.
+2. Crear en el Estanque C un lote `Cachama blanca / Levante`.
+3. Abrir nuevamente **Transferir a otro estanque** y confirmar que el Estanque C tampoco aparece.
+4. Un intento directo al API debe responder `400`, sin crear movimiento ni modificar cantidades.
+
+**Caso permitido:** un estanque vacío sí aparece. También aparece un estanque que contenga únicamente `Cachama blanca / Alevín`; la transferencia debe completarse si tiene capacidad y no posee un ciclo activo o pausado.
+
+### 9.13. División de un lote antes de asignarlo a estanques
+
+Ahora es posible dividir un lote mientras todavía está en la lista de lotes sin estanque. La operación conserva una parte en el lote original, crea un lote hijo con la cantidad separada y deja ambos disponibles para asignarlos posteriormente a estanques diferentes.
+
+**Backend:** [apps/batch/serializers.py](Backend/apps/batch/serializers.py) incorpora `BatchSplitSerializer`, que bloquea el lote durante la operación, valida estado y cantidades, crea el hijo con origen `batch_split`, registra `BatchSource` y reduce la cantidad del padre de forma atómica. [apps/batch/views.py](Backend/apps/batch/views.py) y [apps/batch/urls.py](Backend/apps/batch/urls.py) exponen:
+
+```text
+POST /api/farms/{farm_id}/batches/{batch_id}/split/
+```
+
+El endpoint solo acepta lotes activos que nunca hayan sido asignados a un estanque. Si el lote ya tiene cualquier `PondBatch`, se debe usar el flujo de transferencia desde el estanque. [apps/batch/tests.py](Backend/apps/batch/tests.py) comprueba creación del hijo, cantidades, genealogía, visibilidad de ambos lotes sin estanque, trazabilidad desde el hijo y rechazo después de una asignación.
+
+**Frontend:** [src/app/components/batches/batches.jsx](Frontend/src/app/components/batches/batches.jsx) muestra **Dividir antes de asignar** únicamente en lotes activos sin estanque y con al menos dos peces. [src/app/components/batches/BatchSplitForm.jsx](Frontend/src/app/components/batches/BatchSplitForm.jsx) solicita cantidad y motivo, calcula en tiempo real cuánto conservará el padre y presenta los dos códigos tras completar la operación. [src/lib/batchSplitService.js](Frontend/src/lib/batchSplitService.js) conecta el formulario con el endpoint.
+
+**Cómo probarlo:**
+
+1. Crear o comprar un lote de `1.000` peces y no asignarlo todavía a ningún estanque.
+2. Abrir la lista de **Lotes sin estanque** de la granja.
+3. En la tarjeta del lote, pulsar **Dividir antes de asignar**.
+4. Escribir `400` en **Cantidad que tendrá el nuevo lote** y `Separar cantidades para dos estanques` como motivo.
+5. Confirmar que el formulario indica que el lote original conservará `600` peces y pulsar **Dividir lote**.
+6. La confirmación debe mostrar el código original con `600` y un nuevo código hijo con `400`, unidos por la genealogía.
+7. Pulsar **Ver los dos lotes disponibles**. Ambos deben aparecer por separado y cada uno debe ofrecer **Asignar a Estanque**.
+8. Abrir **Ver trazabilidad** en cualquiera de los dos y comprobar `Origen: <padre> → Remanente: <hijo> · 400 peces`.
+9. Asignar el lote de `600` al Estanque A y el de `400` al Estanque B.
+
+**Validaciones:** no se permite separar `0`, una cantidad negativa, una cantidad igual o superior al total, un lote inactivo o un lote que ya haya estado asignado a un estanque. Una petición rechazada no modifica cantidades ni crea genealogía.

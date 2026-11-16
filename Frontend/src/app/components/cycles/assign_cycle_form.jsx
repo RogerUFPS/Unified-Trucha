@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { API_BASE } from "@/lib/apiConfig";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { CheckCircle2, GitBranch, MapPin } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -33,6 +34,7 @@ export function AssignCycleForm({ farmId, pondId, pondBatchId, defaultQuantity }
   const [quantity, setQuantity] = useState(String(defaultQuantity || ""));
   const [destinationPond, setDestinationPond] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [assignmentResult, setAssignmentResult] = useState(null);
 
   useEffect(() => {
     if (!farmId || !pondId) return;
@@ -155,8 +157,17 @@ export function AssignCycleForm({ farmId, pondId, pondBatchId, defaultQuantity }
         return;
       }
 
-      toast.success("Lote vinculado correctamente al ciclo.");
-      setTimeout(() => window.location.reload(), 1200);
+      const result = await res.json();
+      setAssignmentResult({
+        cycleId: Number(cycle),
+        quantity: parsedQuantity,
+        split: result.split_result,
+      });
+      toast.success(
+        result.split_result
+          ? "Lote dividido y remanente trasladado correctamente."
+          : "Lote vinculado correctamente al ciclo."
+      );
     } catch (err) {
       console.error("Error vinculando ciclo:", err);
       toast.error("Error de conexión. Verifica tu internet e intenta nuevamente.");
@@ -164,6 +175,87 @@ export function AssignCycleForm({ farmId, pondId, pondBatchId, defaultQuantity }
       setSubmitting(false);
     }
   };
+
+  if (assignmentResult) {
+    const split = assignmentResult.split;
+    return (
+      <div className="space-y-4">
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+          <div className="flex items-start gap-3">
+            <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600" />
+            <div>
+              <p className="font-semibold text-emerald-900">
+                {split ? "Lote dividido correctamente" : "Lote vinculado correctamente"}
+              </p>
+              <p className="text-sm text-emerald-800">
+                {split
+                  ? "Las dos partes permanecen registradas y unidas por su genealogía."
+                  : `${assignmentResult.quantity} peces quedaron vinculados al ciclo.`}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {split && (
+          <div className="space-y-3 rounded-xl border p-4">
+            <div className="flex items-center gap-2 font-semibold">
+              <GitBranch className="h-4 w-4 text-purple-600" />
+              Genealogía creada
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="rounded-lg bg-blue-50 p-3 text-sm">
+                <p className="font-semibold text-blue-900">
+                  {split.source_batch.code} · lote origen
+                </p>
+                <p>{split.source_batch.quantity_in_cycle} peces ingresaron al ciclo.</p>
+                <p className="mt-1 flex items-center gap-1 text-slate-600">
+                  <MapPin className="h-3.5 w-3.5" /> {split.source_batch.pond_name}
+                </p>
+              </div>
+              <div className="rounded-lg bg-amber-50 p-3 text-sm">
+                <p className="font-semibold text-amber-900">
+                  {split.remainder_batch.code} · lote remanente
+                </p>
+                <p>{split.remainder_batch.quantity} peces fueron trasladados.</p>
+                <p className="mt-1 flex items-center gap-1 text-slate-600">
+                  <MapPin className="h-3.5 w-3.5" /> {split.remainder_batch.pond_name}
+                </p>
+              </div>
+            </div>
+            <p className="text-xs text-slate-500">
+              Relación: {split.source_batch.code} → {split.remainder_batch.code}. La misma relación aparece en “Ver trazabilidad” para cualquiera de los dos lotes.
+            </p>
+          </div>
+        )}
+
+        <div className="grid gap-2 sm:grid-cols-2">
+          <Button
+            type="button"
+            onClick={() => {
+              window.location.href = `/home/granja/${farmId}/estanque/${pondId}/ciclo/${assignmentResult.cycleId}`;
+            }}
+          >
+            Ver lote dentro del ciclo
+          </Button>
+          {split ? (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                window.location.href = `/home/granja/${farmId}/estanque/${split.remainder_batch.pond_id}`;
+              }}
+            >
+              Ver lote remanente
+            </Button>
+          ) : (
+            <Button type="button" variant="outline" onClick={() => window.location.reload()}>
+              Actualizar estanque
+            </Button>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <FieldGroup>

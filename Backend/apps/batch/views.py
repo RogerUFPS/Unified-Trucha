@@ -1,4 +1,5 @@
 from django.db.models import Exists, OuterRef
+from drf_spectacular.utils import extend_schema
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
@@ -11,6 +12,8 @@ from apps.farms.permissions import IsFarmMember
 from .models import Batch, BatchTransfer, PondBatch
 from .permissions import CanManageBatch
 from .serializers import (
+    BatchSplitSerializer,
+    BatchSplitResultSerializer,
     BatchSerializer,
     BatchTransferSerializer,
     PondBatchSerializer,
@@ -122,6 +125,20 @@ class BatchViewSet(viewsets.ModelViewSet):
         batch = self.get_object()
         return Response(collect_batch_traceability(batch))
 
+    @extend_schema(
+        request=BatchSplitSerializer,
+        responses={201: BatchSplitResultSerializer},
+    )
+    def split(self, request, farm_pk=None, pk=None):
+        batch = self.get_object()
+        serializer = BatchSplitSerializer(
+            data=request.data,
+            context={"batch": batch, "request": request},
+        )
+        serializer.is_valid(raise_exception=True)
+        result = serializer.save()
+        return Response(result, status=status.HTTP_201_CREATED)
+
 
 class PondBatchViewSet(viewsets.ModelViewSet):
     serializer_class = PondBatchSerializer
@@ -181,20 +198,27 @@ class BatchTransferViewSet(viewsets.ViewSet):
 
     def get_queryset(self):
         farm_id = self.kwargs.get("farm_pk")
-        return BatchTransfer.objects.filter(farm_id=farm_id).select_related(
-            "source_pond_batch", "to_pond_batch"
-        ).order_by("-date")
+        return (
+            BatchTransfer.objects.filter(farm_id=farm_id)
+            .select_related(
+                "source_pond_batch__pond",
+                "source_pond_batch__batch",
+                "to_pond_batch__pond",
+                "to_pond_batch__batch",
+            )
+            .order_by("-date", "-id")
+        )
 
     def create(self, request, farm_pk=None):
+        serializer = BatchTransferSerializer(
+            data=request.data,
+            context={"request": request, "view": self},
+        )
+        serializer.is_valid(raise_exception=True)
+        transfer = serializer.save(farm_id=farm_pk)
         return Response(
-            {
-                "detail": (
-                    "Las transferencias no se crean manualmente. Se registran de "
-                    "forma automática al trasladar el remanente de un lote durante "
-                    "su vinculación inicial a un ciclo."
-                )
-            },
-            status=status.HTTP_405_METHOD_NOT_ALLOWED,
+            BatchTransferSerializer(transfer).data,
+            status=status.HTTP_201_CREATED,
         )
 
     def list(self, request, farm_pk=None):

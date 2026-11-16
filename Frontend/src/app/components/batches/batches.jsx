@@ -1,9 +1,12 @@
 "use client";
 
 import { useEffect, useState, useMemo } from "react";
-import { Scale, Pencil, MoveRight, Fish, Link, FileDown, GitBranch } from "lucide-react";
+import { Scale, Pencil, MoveRight, Fish, Link, FileDown, GitBranch, ArrowRightLeft, History, Scissors } from "lucide-react";
 import { BatchReportModal } from "./BatchReportModal";
 import { BatchTraceabilityModal } from "./BatchTraceabilityModal";
+import { BatchTransferForm } from "./BatchTransferForm";
+import { BatchTransferHistoryModal } from "./BatchTransferHistoryModal";
+import { BatchSplitForm } from "./BatchSplitForm";
 import {
   Card,
   CardAction,
@@ -69,6 +72,7 @@ export function Batches({ id, pondId, cycleId, search = "", statusFilter = null 
   // { batchId, batchLabel } | null
   const [reportBatch, setReportBatch] = useState(null);
   const [traceabilityBatch, setTraceabilityBatch] = useState(null);
+  const [transferHistoryOpen, setTransferHistoryOpen] = useState(false);
   const { authReady, hasToken } = useAuthReady();
 
   useEffect(() => {
@@ -259,6 +263,14 @@ export function Batches({ id, pondId, cycleId, search = "", statusFilter = null 
     <>
       <Toaster position="top-center" />
 
+      {!!pondId && !cycleId && (
+        <div className="mx-auto flex max-w-6xl justify-end px-4 pt-4">
+          <Button type="button" variant="outline" onClick={() => setTransferHistoryOpen(true)}>
+            <History className="mr-2 h-4 w-4" /> Historial de transferencias
+          </Button>
+        </div>
+      )}
+
       <div className="max-w-6xl mx-auto grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-6 p-4">
         {filteredBatches.length === 0 && !search && (
           <div className="col-span-full bg-white rounded-2xl border border-dashed border-slate-200 py-12 text-center">
@@ -413,6 +425,29 @@ export function Batches({ id, pondId, cycleId, search = "", statusFilter = null 
                     </DialogContent>
                   </Dialog>
                 )}
+                {!pondId && !cycleId && !b.pond && !item.pond && b.status === "active" && Number(b.initial_quantity) > 1 && (
+                  <Dialog>
+                    <DialogTrigger asChild>
+                      <Button variant="outline" className="w-full border-purple-200 text-purple-700 hover:bg-purple-50">
+                        <Scissors className="mr-2 h-4 w-4" /> Dividir antes de asignar
+                      </Button>
+                    </DialogTrigger>
+                    <DialogContent className="w-[95vw] max-w-lg max-h-[90vh] overflow-y-auto">
+                      <DialogHeader>
+                        <DialogTitle>Dividir {b.code || `Lote #${displayId}`}</DialogTitle>
+                        <DialogDescription>
+                          Crea dos lotes trazables antes de asignarlos a sus estanques.
+                        </DialogDescription>
+                      </DialogHeader>
+                      <BatchSplitForm
+                        farmId={id}
+                        batchId={b.id}
+                        batchCode={b.code || `Lote #${displayId}`}
+                        totalQuantity={b.initial_quantity}
+                      />
+                    </DialogContent>
+                  </Dialog>
+                )}
                 {!!pondId && !cycleId && !item.assigned_cycle && !b.active_cycle && (
                   <Dialog>
                     <DialogTrigger asChild>
@@ -433,6 +468,32 @@ export function Batches({ id, pondId, cycleId, search = "", statusFilter = null 
                         pondId={pondId}
                         pondBatchId={item.id}
                         defaultQuantity={displayQuantity}
+                      />
+                    </DialogContent>
+                  </Dialog>
+                )}
+                {!!pondId && !cycleId && isPondBatch && !item.assigned_cycle && !b.active_cycle && displayQuantity > 0 && (
+                  <Dialog>
+                    <DialogTrigger asChild>
+                      <Button variant="outline" className="w-full border-amber-200 text-amber-700 hover:bg-amber-50">
+                        <ArrowRightLeft className="mr-2 h-4 w-4" /> Transferir a otro estanque
+                      </Button>
+                    </DialogTrigger>
+                    <DialogContent className="w-[95vw] max-w-lg max-h-[90vh] overflow-y-auto">
+                      <DialogHeader>
+                        <DialogTitle>Transferir {b.code || `Lote #${displayId}`}</DialogTitle>
+                        <DialogDescription>
+                          Disponible solo para lotes que no pertenecen a un ciclo activo o pausado.
+                        </DialogDescription>
+                      </DialogHeader>
+                      <BatchTransferForm
+                        farmId={id}
+                        sourcePondId={pondId}
+                        sourcePondBatchId={item.id}
+                        currentQuantity={displayQuantity}
+                        batchCode={b.code || `Lote #${displayId}`}
+                        sourceSpecieId={b.specie?.id || b.specie}
+                        sourceBiologicalState={b.biological_state}
                       />
                     </DialogContent>
                   </Dialog>
@@ -463,6 +524,12 @@ export function Batches({ id, pondId, cycleId, search = "", statusFilter = null 
         farmId={id}
         batchId={traceabilityBatch?.batchId}
         batchLabel={traceabilityBatch?.batchLabel ?? ""}
+      />
+      <BatchTransferHistoryModal
+        open={transferHistoryOpen}
+        onClose={() => setTransferHistoryOpen(false)}
+        farmId={id}
+        pondId={pondId}
       />
     </>
   );

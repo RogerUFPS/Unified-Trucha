@@ -15,6 +15,7 @@ def area_to_hectares(value):
 
 class PondSerializer(serializers.ModelSerializer):
     has_active_cycle = serializers.SerializerMethodField()
+    resident_profile = serializers.SerializerMethodField()
 
     class Meta:
         model = Pond
@@ -33,6 +34,7 @@ class PondSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
             "has_active_cycle",
+            "resident_profile",
         ]
         read_only_fields = ["farm", "created_at", "updated_at", "code"]
 
@@ -44,6 +46,24 @@ class PondSerializer(serializers.ModelSerializer):
             deleted_at__isnull=True,
             state__in=[Cycle.State.IN_PROGRESS, Cycle.State.PAUSED],
         ).exists()
+
+    def get_resident_profile(self, obj) -> dict | None:
+        """Especie y etapa que pueden convivir actualmente en el estanque."""
+        active_assignments = obj.pondbatch_set.filter(
+            end_date__isnull=True,
+            current_quantity__gt=0,
+            batch__status="active",
+        ).select_related("batch__specie")
+        first = active_assignments.first()
+        if first is None:
+            return None
+        total = active_assignments.aggregate(total=Sum("current_quantity"))["total"] or 0
+        return {
+            "specie_id": first.batch.specie_id,
+            "specie_name": first.batch.specie.name,
+            "biological_state": first.batch.biological_state,
+            "current_quantity": total,
+        }
 
     def validate(self, data):
         farm = self.context["farm"]

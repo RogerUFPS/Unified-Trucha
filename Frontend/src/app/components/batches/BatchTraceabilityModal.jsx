@@ -76,9 +76,17 @@ export function BatchTraceabilityModal({ open, onClose, farmId, batchId, batchLa
 
             <section className="rounded-xl border p-4 space-y-2">
               <h3 className="font-semibold flex items-center gap-2"><GitBranch className="h-4 w-4" /> Genealogía</h3>
+              <p className="text-xs text-slate-500">
+                Lote consultado: {data.batch?.code || batchLabel}. Las flechas muestran el lote origen y cada remanente derivado.
+              </p>
               {data.genealogy?.length ? data.genealogy.map((link) => (
-                <div key={`${link.parent_id}-${link.child_id}`} className="text-sm rounded-lg bg-slate-50 p-3">
-                  {link.parent_code} → {link.child_code} · {link.quantity} peces
+                <div key={`${link.parent_id}-${link.child_id}`} className="text-sm rounded-lg border border-purple-100 bg-purple-50/60 p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="rounded bg-blue-100 px-2 py-0.5 font-medium text-blue-800">Origen: {link.parent_code}</span>
+                    <span aria-hidden="true">→</span>
+                    <span className="rounded bg-amber-100 px-2 py-0.5 font-medium text-amber-800">Remanente: {link.child_code}</span>
+                  </div>
+                  <p className="mt-2 text-slate-600">Cantidad separada: {link.quantity} peces</p>
                 </div>
               )) : <Empty>Este lote no ha sido dividido ni derivado.</Empty>}
             </section>

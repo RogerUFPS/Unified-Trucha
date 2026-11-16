@@ -325,6 +325,7 @@ class CycleSerializer(serializers.ModelSerializer):
 
 class CyclePondBatchSerializer(serializers.ModelSerializer):
     pond_batch_detail = PondBatchDetailSerializer(source="pond_batch", read_only=True)
+    split_result = serializers.SerializerMethodField()
     destination_pond = serializers.PrimaryKeyRelatedField(
         queryset=Pond.objects.filter(deleted_at__isnull=True),
         write_only=True,
@@ -339,6 +340,7 @@ class CyclePondBatchSerializer(serializers.ModelSerializer):
             "cycle",
             "pond_batch",
             "pond_batch_detail",
+            "split_result",
             "destination_pond",
             "quantity",
             "min_weight_g",
@@ -346,6 +348,10 @@ class CyclePondBatchSerializer(serializers.ModelSerializer):
             "max_weight_g",
         ]
         read_only_fields = ["min_weight_g", "avg_weight_g", "max_weight_g"]
+
+    def get_split_result(self, instance) -> dict | None:
+        """Describe la división creada por este POST; en lecturas históricas es nulo."""
+        return getattr(instance, "_split_result", None)
 
     def validate(self, data):
         if self.instance is not None:
@@ -521,6 +527,7 @@ class CyclePondBatchSerializer(serializers.ModelSerializer):
             .get(pk=validated_data["pond_batch"].pk)
         )
         quantity = validated_data["quantity"]
+        split_result = None
 
         if quantity > pond_batch.current_quantity:
             raise serializers.ValidationError(
@@ -593,6 +600,29 @@ class CyclePondBatchSerializer(serializers.ModelSerializer):
                 ),
             )
 
+            split_result = {
+                "was_split": True,
+                "source_batch": {
+                    "id": source_batch.pk,
+                    "code": source_batch.code,
+                    "quantity_in_cycle": quantity,
+                    "pond_id": pond_batch.pond_id,
+                    "pond_name": pond_batch.pond.name,
+                },
+                "remainder_batch": {
+                    "id": child_batch.pk,
+                    "code": child_batch.code,
+                    "quantity": remainder,
+                    "pond_batch_id": destination_assignment.pk,
+                    "pond_id": destination_pond.pk,
+                    "pond_name": destination_pond.name,
+                },
+                "genealogy": {
+                    "parent_batch_id": source_batch.pk,
+                    "child_batch_id": child_batch.pk,
+                },
+            }
+
         validated_data["pond_batch"] = pond_batch
 
         # Calcular pesos desde el pond_batch
@@ -603,4 +633,6 @@ class CyclePondBatchSerializer(serializers.ModelSerializer):
         validated_data["avg_weight_g"] = weights["avg_weight_g"]
         validated_data["max_weight_g"] = weights["max_weight_g"]
 
-        return super().create(validated_data)
+        instance = super().create(validated_data)
+        instance._split_result = split_result
+        return instance
